@@ -53,3 +53,8 @@ backup_project/
 python3 backup.py              # Запуск бэкапа с config.json
 python3 backup.py myconf.json  # Запуск с кастомным конфигом
 python3 backup_tool.py         # Поиск/восстановление
+
+python3 backup_tool.py recreate --force
+python3 backup_tool.py /path/backup search --mask "*.py" --mask "*.pdf" --mask "*.md"
+
+
