@@ -80,14 +80,15 @@ This project contains two Python scripts for a flexible backup system:
 **Backup**:
 
 ```bash
-python3 backup.py             # Uses default config.json
-python3 backup.py my_config.json  # Uses alternate config
+python3 backup.py                             # Uses default config.json
+python3 backup.py --config my_config.json     # Uses alternate config
 ```
 
 **Backup Tool**:
 
 ```bash
-python3 backup_tool.py
+python3 backup_tool.py recreate --force
+python3 backup_tool.py /path/backup search --mask "*.py" --mask "*.pdf" --mask "*.md"
 ```
 
 ---
