@@ -247,7 +247,7 @@ def backup(config_file: Path):
     if has_files_for_increment:
         ts = time.strftime("%Y%m%d_%H%M%S")
         increment_path = dst_path / f"backup_{ts}"
-        log.info(f"Creating increment: {increment_path}")
+        log.info(f"Creating increment: {increment_path.name}")
         increment_path.mkdir(parents=True, exist_ok=True)
 
         files_added_to_increment = False
@@ -312,8 +312,6 @@ def backup(config_file: Path):
         for i, future in enumerate(as_completed(futures), 1):
             try:
                 future.result()
-                if i % 100 == 0:
-                    log.info(f"Copied {i}/{len(futures)} files to mirror")
             except Exception as e:
                 log.error(f"Failed to copy file: {e}")
 
@@ -354,16 +352,16 @@ def backup(config_file: Path):
     temp_mirror_json.replace(mirror_json_path)
 
     # --- Statistics ---
-    log.info("="*50)
+    log.info("-"*50)
     log.info(f"Total files in source: {len(mirror_set)}")
     log.info(f"Tracked files: {len(tracked_set)}")
     log.info(f"Files removed from mirror: {files_removed}")
     
     if increment_created:
-        log.info(f"Increment created: {increment_path}")
+        log.info(f"Increment created: {increment_path.name}")
         log.info(f"Tracked new/changed: {len(new_or_changed_tracked)}")
         log.info(f"Tracked deleted: {len(deleted_tracked)}")
-        log.info(f"Metadata: {metadata_path}")
+        log.info(f"Metadata: {metadata_path.name}")
     else:
         log.info("No tracked file changes - no increment needed")
 
