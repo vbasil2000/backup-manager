@@ -28,11 +28,15 @@ def load_config(config_file: Path):
 
 def copy_file(src, dst):
     """Copy file with parent directory creation"""
+    if not src.is_file():
+        return
     dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(src, dst)
 
 def hardlink_file(src, dst):
     """Create hardlink or copy if cross-filesystem"""
+    if not src.is_file():
+        return
     dst.parent.mkdir(parents=True, exist_ok=True)
     try:
         os.link(src, dst)
@@ -50,93 +54,104 @@ def remove_empty_dirs(path):
             except (PermissionError, OSError):
                 continue
 
-def matches_any(path_str, patterns):
-    """Check if path matches any pattern"""
-    return any(fnmatch.fnmatch(path_str, pat) for pat in patterns)
+def _matches_pattern(file_path: Path, pattern: str, src_path: Path) -> bool:
+    """Ultra-simple pattern matcher: only *.txt and *.txt:rec"""
+    if not file_path.is_file():
+        return False
+        
+    try:
+        rel_path = file_path.relative_to(src_path)
+        
+        if pattern.endswith(':rec'):
+            # Recursive: match any level - "*.txt:rec"
+            return fnmatch.fnmatch(str(rel_path), pattern[:-4])
+        else:
+            # Non-recursive: only root - "*.txt"
+            return (str(rel_path.parent) == '.' and 
+                    fnmatch.fnmatch(rel_path.name, pattern))
+    except ValueError:
+        return False
 
-def build_mirror_set(src_path, include_dirs, track_dirs, include_files, track_files, exclude_dirs, exclude_files):
+def apply_patterns(files_set: set, patterns: list, src_path: Path) -> set:
+    """Apply patterns to file set - pure filtering"""
+    result = set()
+    for file_path in files_set:
+        for pattern in patterns:
+            if _matches_pattern(file_path, pattern, src_path):
+                result.add(file_path)
+                break
+    return result
+
+def _in_excluded_dir(file_path: Path, exclude_dir: str, src_path: Path) -> bool:
+    """Check if file is in excluded directory"""
+    try:
+        rel_path = file_path.relative_to(src_path)
+        return str(rel_path).startswith(exclude_dir + '/')
+    except ValueError:
+        return False
+
+def build_mirror_set(src_path: Path, include_dirs: list, track_dirs: list, 
+                    include_files: list, track_files: list, exclude_dirs: list, exclude_files: list) -> dict:
     """
-    Build mirror_set according to the algorithm:
-    1. Scan include_dirs + track_dirs (raw sets)
-    2. Apply exclude_dirs (but protect explicit files)
-    3. Add explicit files from include_files + track_files
-    4. Apply exclude_files (explicit files remain protected)
+    Pure set mathematics:
+    1. Scan all directories
+    2. Add root files from patterns  
+    3. Remove excluded directories
+    4. Remove excluded files
+    5. Mark tracked files
     """
     src_path = src_path.resolve()
-    all_files = {}
-    explicit_files = set()
     
-    # --- Step 1: Scan directories (include_dirs + track_dirs) ---
-    for d in include_dirs + track_dirs:
-        is_tracked = d in track_dirs
-        path = src_path / d
-        if not path.exists():
-            continue
-            
-        try:
-            # Always scan recursively
-            for f in path.rglob("*"):
-                if f.is_file() and f.is_relative_to(src_path):
-                    all_files[f] = is_tracked
-        except (PermissionError, OSError) as e:
-            log.warning(f"Permission denied scanning {path}: {e}")
+    # 1. Scan all directories (include + track)
+    all_files = set()
+    for dir_path in include_dirs + track_dirs:
+        full_dir = src_path / dir_path
+        if full_dir.exists() and full_dir.is_dir():
+            try:
+                all_files.update(
+                    f for f in full_dir.rglob('*') 
+                    if f.is_file() and f.is_relative_to(src_path)
+                )
+            except (PermissionError, OSError):
+                continue
     
-    # --- Step 2: Apply exclude_dirs ---
-    excluded_by_dirs = set()
-    for file_path in all_files.keys():
-        try:
-            rel_path = file_path.relative_to(src_path)
-            # Check if file is in any excluded directory
-            for exclude_dir in exclude_dirs:
-                exclude_parts = Path(exclude_dir).parts
-                if rel_path.parts[:len(exclude_parts)] == exclude_parts:
-                    excluded_by_dirs.add(file_path)
-                    break
-        except ValueError:
-            excluded_by_dirs.add(file_path)
-    
-    # Remove files excluded by directories
-    for file_path in excluded_by_dirs:
-        if file_path in all_files:
-            del all_files[file_path]
-    
-    # --- Step 3: Add explicit files (include_files + track_files) ---
+    # 2. Add root files for non-recursive patterns
+    root_files = set()
     for pattern in include_files + track_files:
-        is_tracked = pattern in track_files
-        
-        try:
-            # Handle both exact paths and glob patterns
-            if any(char in pattern for char in ['*', '?', '[']):
-                matches = list(src_path.rglob(pattern))
-            else:
-                matches = [src_path / pattern]
-                
-            for matched_file in matches:
-                if matched_file.is_file() and matched_file.is_relative_to(src_path):
-                    all_files[matched_file] = is_tracked
-                    explicit_files.add(matched_file)
-        except (PermissionError, OSError) as e:
-            log.warning(f"Permission denied processing pattern {pattern}: {e}")
+        if not pattern.endswith(':rec'):
+            try:
+                for file_path in src_path.glob(pattern):
+                    if file_path.is_file() and file_path.is_relative_to(src_path):
+                        root_files.add(file_path)
+            except (PermissionError, OSError):
+                continue
     
-    # --- Step 4: Apply exclude_files (non-explicit files only) ---
-    files_to_remove = set()
-    for file_path, is_tracked in all_files.items():
-        if file_path in explicit_files:
-            continue  # Explicit files are protected
-            
-        try:
-            rel_path = file_path.relative_to(src_path)
-            if matches_any(str(rel_path), exclude_files) or matches_any(rel_path.name, exclude_files):
-                files_to_remove.add(file_path)
-        except ValueError:
-            files_to_remove.add(file_path)
+    all_files.update(root_files)
     
-    for file_path in files_to_remove:
-        del all_files[file_path]
+    # 3. Remove excluded directories
+    excluded_dirs_set = set()
+    for file_path in all_files:
+        for exclude_dir in exclude_dirs:
+            if _in_excluded_dir(file_path, exclude_dir, src_path):
+                excluded_dirs_set.add(file_path)
+                break
+    all_files -= excluded_dirs_set
     
-    return all_files
+    # 4. Remove excluded files
+    excluded_files_set = apply_patterns(all_files, exclude_files, src_path)
+    all_files -= excluded_files_set
+    
+    # 5. Mark tracked files
+    tracked_patterns = []
+    for dir_path in track_dirs:
+        tracked_patterns.append(f"{dir_path}/*:rec")
+    tracked_patterns.extend(track_files)
+    
+    tracked_set = apply_patterns(all_files, tracked_patterns, src_path)
+    
+    return {f: (f in tracked_set) for f in all_files}
 
-def create_increment_metadata(increment_path, new_changed_files, deleted_files, src_path):
+def create_increment_metadata(increment_path: Path, new_changed_files: set, deleted_files: set, src_path: Path) -> Path:
     """Create JSON metadata for incremental backup"""
     metadata_path = increment_path / f"{increment_path.name}.json"
 
@@ -154,22 +169,15 @@ def create_increment_metadata(increment_path, new_changed_files, deleted_files, 
             "total_operations": len(new_changed_files) + len(deleted_files)
         },
         "files": {
-            "new_changed": [],
+            "new_changed": [{
+                "path": str(f.relative_to(src_path)),
+                "size": f.stat().st_size,
+                "mtime": f.stat().st_mtime,
+                "backup_location": f"track/{f.relative_to(src_path)}"
+            } for f in new_changed_files if f.is_file()],
             "deleted": list(deleted_files)
         }
     }
-
-    for f in new_changed_files:
-        try:
-            rel_path = str(f.relative_to(src_path))
-            metadata["files"]["new_changed"].append({
-                "path": rel_path,
-                "size": f.stat().st_size,
-                "mtime": f.stat().st_mtime,
-                "backup_location": f"track/{rel_path}"
-            })
-        except (OSError, ValueError) as e:
-            log.warning(f"Could not get info for file {f}: {e}")
 
     with open(metadata_path, "w", encoding="utf-8") as f:
         json.dump(metadata, f, indent=2, ensure_ascii=False)
@@ -177,14 +185,14 @@ def create_increment_metadata(increment_path, new_changed_files, deleted_files, 
     return metadata_path
 
 def backup(config_file: Path):
-    """Main backup routine following the exact algorithm"""
+    """Main backup routine with pure set operations"""
     cfg = load_config(config_file)
     src_path = Path(cfg["src"]).expanduser().resolve()
     dst_path = Path(cfg["dist"]).expanduser().resolve()
     mirror_path = dst_path / "mirror"
     mirror_path.mkdir(parents=True, exist_ok=True)
 
-    log.info("Building mirror set according to algorithm...")
+    log.info("Building mirror set using pure set mathematics...")
     mirror_set = build_mirror_set(
         src_path,
         cfg["include_dirs"],
@@ -197,126 +205,97 @@ def backup(config_file: Path):
 
     tracked_set = {f for f, t in mirror_set.items() if t}
 
-    # --- Load previous mirror state ---
+    # Load previous mirror state
     mirror_json_path = mirror_path / "mirror.json"
     old_mirror = {}
     if mirror_json_path.exists():
         with open(mirror_json_path, "r", encoding="utf-8") as f:
             old_mirror = json.load(f)
 
-    # --- Classify tracked files ---
-    new_or_changed_tracked = set()
-    deleted_tracked = set()
-    current_tracked_rel = {str(f.relative_to(src_path)) for f in tracked_set}
-
-    # Check for new/changed tracked files
-    for f in tracked_set:
-        rel = str(f.relative_to(src_path))
-        old_info = old_mirror.get(rel)
-        if (not old_info or
-            old_info["size"] != f.stat().st_size or
-            abs(old_info["mtime"] - f.stat().st_mtime) > 1):
-            new_or_changed_tracked.add(f)
-
-    # Check for deleted tracked files
-    for rel, info in old_mirror.items():
-        if info.get("tracked", False) and rel not in current_tracked_rel:
-            deleted_tracked.add(rel)
-
-    increment_created = False
-    metadata_path = None
-
-    # --- Check if we need to create increment ---
-    has_files_for_increment = False
+    # Classify tracked files
+    current_tracked_rel = {str(f.relative_to(src_path)) for f in tracked_set if f.is_file()}
     
-    # Check deleted files exist in mirror
-    for rel in deleted_tracked:
-        mirror_file = mirror_path / rel
-        if mirror_file.exists():
-            has_files_for_increment = True
-            break
-    
-    # Check new/changed files exist in source
-    if not has_files_for_increment:
-        for f in new_or_changed_tracked:
-            if f.exists():
-                has_files_for_increment = True
-                break
+    new_or_changed_tracked = {
+        f for f in tracked_set 
+        if f.is_file() and (
+            str(f.relative_to(src_path)) not in old_mirror or
+            old_mirror[str(f.relative_to(src_path))]["size"] != f.stat().st_size or
+            abs(old_mirror[str(f.relative_to(src_path))]["mtime"] - f.stat().st_mtime) > 1
+        )
+    }
 
-    # --- Create increment if needed ---
+    deleted_tracked = {
+        rel for rel, info in old_mirror.items() 
+        if info.get("tracked", False) and rel not in current_tracked_rel
+    }
+
+    # Create increment if needed
+    has_files_for_increment = (
+        any((mirror_path / rel).exists() and (mirror_path / rel).is_file() for rel in deleted_tracked) or
+        any(f.exists() and f.is_file() for f in new_or_changed_tracked)
+    )
+
     if has_files_for_increment:
         ts = time.strftime("%Y%m%d_%H%M%S")
         increment_path = dst_path / f"backup_{ts}"
-        log.info(f"Creating increment: {increment_path.name}")
+        log.info(f"Creating increment: {increment_path}")
         increment_path.mkdir(parents=True, exist_ok=True)
 
-        files_added_to_increment = False
-
-        # --- 1. Process DELETED tracked files FIRST ---
+        # Process deleted files
         deleted_count = 0
         for rel in deleted_tracked:
             src_mirror_file = mirror_path / rel
-            if src_mirror_file.exists():
-                increment_deleted = increment_path / "deleted"
-                increment_deleted.mkdir(parents=True, exist_ok=True)
-                dst_file = increment_deleted / rel
+            if src_mirror_file.exists() and src_mirror_file.is_file():
+                dst_file = increment_path / "deleted" / rel
+                dst_file.parent.mkdir(parents=True, exist_ok=True)
                 hardlink_file(src_mirror_file, dst_file)
                 deleted_count += 1
-                files_added_to_increment = True
 
-        # --- 2. Process NEW/CHANGED tracked files ---
+        # Process new/changed files
         track_count = 0
         for f in new_or_changed_tracked:
-            if f.exists():
+            if f.exists() and f.is_file():
                 rel = str(f.relative_to(src_path))
-                increment_track = increment_path / "track"
-                increment_track.mkdir(parents=True, exist_ok=True)
-                dst_file = increment_track / rel
                 src_mirror_file = mirror_path / rel
+                dst_file = increment_path / "track" / rel
                 
-                # Update mirror first
                 hardlink_file(f, src_mirror_file)
-                # Then create increment
+                dst_file.parent.mkdir(parents=True, exist_ok=True)
                 hardlink_file(src_mirror_file, dst_file)
-                
                 track_count += 1
-                files_added_to_increment = True
 
-        if files_added_to_increment:
-            metadata_path = create_increment_metadata(
-                increment_path, new_or_changed_tracked, deleted_tracked, src_path
-            )
-            increment_created = True
-            log.info(f"  Added {deleted_count} deleted and {track_count} new/changed files to increment")
+        if deleted_count or track_count:
+            metadata_path = create_increment_metadata(increment_path, new_or_changed_tracked, deleted_tracked, src_path)
+            log.info(f"Added {deleted_count} deleted and {track_count} new/changed files")
         else:
-            # No files were actually added - remove empty increment
             shutil.rmtree(increment_path)
             log.info("No files to backup - increment removed")
 
-    # --- 3. Update mirror with ALL files ---
+    # Update mirror
     log.info("Updating mirror directory...")
     with ThreadPoolExecutor(max_workers=cfg["max_workers"]) as exe:
         futures = {}
-        for f, tracked in mirror_set.items():
+        for f in mirror_set.keys():
+            if not f.is_file():
+                continue
             try:
                 rel = str(f.relative_to(src_path))
                 dst_file = mirror_path / rel
-                need_copy = (not dst_file.exists() or
-                             dst_file.stat().st_size != f.stat().st_size or
-                             abs(dst_file.stat().st_mtime - f.stat().st_mtime) > 1)
-                if need_copy:
+                if not dst_file.exists() or not dst_file.is_file() or dst_file.stat().st_size != f.stat().st_size:
                     futures[exe.submit(copy_file, f, dst_file)] = f
-            except (OSError, ValueError) as e:
-                log.warning(f"Skipping file {f}: {e}")
+            except (OSError, ValueError):
+                continue
 
         for i, future in enumerate(as_completed(futures), 1):
             try:
                 future.result()
+                if i % 100 == 0:
+                    log.info(f"Copied {i}/{len(futures)} files to mirror")
             except Exception as e:
                 log.error(f"Failed to copy file: {e}")
 
-    # --- 4. Clean up mirror: remove files not in current mirror_set ---
-    current_mirror_rel = {str(f.relative_to(src_path)) for f in mirror_set}
+    # Clean up mirror
+    current_mirror_rel = {str(f.relative_to(src_path)) for f in mirror_set.keys() if f.is_file()}
     files_removed = 0
     
     for mirror_file in mirror_path.rglob("*"):
@@ -326,15 +305,16 @@ def backup(config_file: Path):
                 if rel not in current_mirror_rel:
                     mirror_file.unlink()
                     files_removed += 1
-            except (ValueError, OSError) as e:
-                log.warning(f"Could not remove {mirror_file}: {e}")
+            except (OSError, ValueError):
                 continue
     
     remove_empty_dirs(mirror_path)
 
-    # --- 5. Save new mirror state ---
+    # Save new mirror state
     mirror_data = {}
     for f, tracked in mirror_set.items():
+        if not f.is_file():
+            continue
         try:
             rel = str(f.relative_to(src_path))
             mirror_data[rel] = {
@@ -342,39 +322,34 @@ def backup(config_file: Path):
                 "mtime": f.stat().st_mtime,
                 "tracked": tracked
             }
-        except (OSError, ValueError) as e:
-            log.warning(f"Skipping file in mirror.json: {f} - {e}")
+        except (OSError, ValueError):
+            continue
 
-    # Atomic write to avoid corruption
+    # Atomic write
     temp_mirror_json = mirror_json_path.with_suffix('.tmp')
     with open(temp_mirror_json, "w", encoding="utf-8") as f:
         json.dump(mirror_data, f, indent=2, ensure_ascii=False)
     temp_mirror_json.replace(mirror_json_path)
 
-    # --- Statistics ---
-    log.info("-"*50)
-    log.info(f"Total files in source: {len(mirror_set)}")
+    # Statistics
+    log.info("="*50)
+    log.info(f"Total files: {len(mirror_set)}")
     log.info(f"Tracked files: {len(tracked_set)}")
     log.info(f"Files removed from mirror: {files_removed}")
-    
-    if increment_created:
-        log.info(f"Increment created: {increment_path.name}")
-        log.info(f"Tracked new/changed: {len(new_or_changed_tracked)}")
-        log.info(f"Tracked deleted: {len(deleted_tracked)}")
-        log.info(f"Metadata: {metadata_path.name}")
-    else:
-        log.info("No tracked file changes - no increment needed")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Backup script with mirror + incremental")
+    parser = argparse.ArgumentParser(description="Backup script with pure set mathematics")
     parser.add_argument("--config", type=str, default="config.json", help="Path to config file")
     args = parser.parse_args()
     config_file = Path(args.config).resolve()
+    
     if not config_file.exists():
         log.error(f"Config file not found: {config_file}")
         exit(1)
+        
     try:
         backup(config_file)
     except Exception as e:
         log.error(f"Backup failed: {e}")
         raise
+        
