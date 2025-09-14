@@ -1,106 +1,136 @@
-# Backup System Utility
+# Minimalistic Yet Powerful Backup System
 
-## Overview
+This backup system is designed to be simple, reliable, and high-performance. With just \~350 lines of Python code and a tiny JSON config, you can handle complex backup scenarios.
 
-This project contains two Python scripts for a flexible backup system:
+## How it Works
 
-* **backup.py** – performs incremental backups using a mirror-based approach.
-* **backup\_tool.py** – a utility to inspect, explore, and manage backups.
+1. **Source → Mirror → Incremental Backups**
 
-## Key Features
+   * `src` — your source files
+   * `mirror` — live copy of all tracked files
+   * `backup_xxx` — incremental copies of changes and deletions
 
-* **Mirror + Incremental Approach**: The mirror directory reflects the source; increments store hard links, avoiding duplication.
-* **Independent Increments**: Each backup increment is self-contained; you can remove, copy, or move them without affecting others.
-* **Standard Python Libraries**: No external dependencies required.
-* **Dynamic Configurations**: Easily modify include/exclude lists, tracked directories, etc.
-* **Multiple Profiles**: You can define multiple configuration files, e.g., one for USB drives, one for another disk.
-* **Cross-Platform**: Works on Linux, macOS, Windows.
-* **Efficient Handling**: Deleted tracked files are correctly managed in increments without cluttering the mirror.
+2. **Set-based Mathematics**
 
-## Scripts Description
+   * Pure set operations to determine new, changed, and deleted files
+   * No duplicates, no extra scans
+   * Predictable and deterministic
 
-### 1. backup.py
+3. **Incremental Backups**
 
-**Purpose:** Incremental backup script with mirror management.
+   * Only new/changed files + deleted files
+   * Hardlinks to mirror save space
+   * JSON metadata tracks all operations
 
-**Workflow:**
+## Configuration (Simple JSON)
 
-* **Scan Source**: Recursively scans src directories/files using include/exclude rules.
-* **Classification**: Separates tracked vs. non-tracked files.
-* **Comparison**: Compares with current mirror state.
-* **Increment Creation**: Creates hard links for new or changed tracked files.
-* **Mirror Update**: Copies new/changed files into the mirror.
-* **Cleanup**: Removes files from mirror that no longer exist in source.
-* **Metadata**: Generates JSON metadata for increments.
-
-**Config File:** `config.json` by default, can be overridden via CLI parameter. Example:
+**Directories:**
 
 ```json
 {
-  "src": "~/Documents",
-  "dist": "~/Backups",
-  "include_dirs": ["projects", "notes"],
-  "track_dirs": ["projects"],
-  "include_files": ["*.txt", "*.md"],
-  "track_files": ["important.docx"],
-  "exclude_dirs": ["tmp", "cache"],
-  "exclude_files": ["*.log"],
-  "max_workers": 8
+  "include_dirs": [".config", "Documents"],
+  "track_dirs": [],
+  "exclude_dirs": ["tmp", "Images"]
 }
 ```
 
-**Notes:**
+**Files:**
 
-* `track_dirs` and `track_files` are mirrored in increments.
-* Deleted tracked files create links in deleted folder inside increment.
-* Mirror keeps only current files; increments maintain all history.
-* Increment metadata is stored as `backup_YYYYMMDD_HHMMSS.json`.
-
-### 2. backup\_tool.py
-
-**Purpose:** Utility to explore and inspect backups.
-
-**Key Features:**
-
-* Browse backup increments and mirror contents.
-* Search files across increments.
-* Check metadata for each increment.
-* Safe viewing without modifying backup data.
-* Supports multiple backup profiles via config files.
-
-## Usage
-
-**Backup:**
-
-```bash
-python3 backup.py                             # Uses default config.json
-python3 backup.py --config my_config.json     # Uses alternate config
+```json
+{
+  "include_files": [".*", "*.txt:rec"],
+  "track_files": [],
+  "exclude_files": ["*.tmp", "*.log:rec"]
+}
 ```
 
-**Backup Tool:**
+**Features:**
+
+* `:rec` → recursive search at any level
+* Patterns without `:rec` → only root directory
+* Directories are paths relative to `src`
+* Files are patterns — easy to control granularity
+
+## Implementation Highlights
+
+### Performance
+
+* Parallel file copying (ThreadPoolExecutor)
+* Minimal I/O operations
+* Lightning-fast set operations
+
+### Reliability
+
+* Atomic JSON writes → prevents corruption
+* Handles all file read/write errors
+* Safe removal of empty directories
+* Edge cases fully accounted for
+
+### Incrementals
+
+* Files categorized as:
+
+  * **new/changed** → hardlink to mirror + copy to increment
+  * **deleted** → hardlink to mirror + record in increment
+* Metadata includes: size, mtime, path, operation type, and statistics
+
+## Pattern System
+
+* **Recursive:** `*.txt:rec` → all levels
+* **Non-recursive:** `.*` → only root directory
+* **Exclusions:** `*.tmp`, `*.log:rec`
+* **Advantage:** strict, predictable, no magic
+
+## Set-based Logic
+
+* `new_files` = `current_tracked - old_mirror`
+* `deleted_files` = `old_mirror - current_tracked`
+* `updated_files` = compare size & mtime
+* Fully deterministic — predictable backups
+
+## Atomic & Safe Operations
+
+* Temporary `.tmp` files → atomic JSON replacement
+* Hardlinks instead of copies → saves disk space & time
+* Parallel processing → faster for thousands of files
+
+## Statistics
+
+After backup, you get:
+
+* Total files in mirror
+* Number of tracked files
+* Files removed from mirror
+* New/changed/deleted files in incremental backup
+
+## Minimal Complexity
+
+* 350 lines of Python → easy to read, modify, and maintain
+* 10 lines of config → easy to customize include/exclude rules
+* 0 dependencies → pure Python
+
+## Key Advantages
+
+1. No magic — fully explicit and predictable
+2. Space-efficient — hardlinks + incremental backups
+3. Full control over operations
+4. Fast, safe, reliable
+5. Suitable for personal or professional use
+
+## Getting Started
+
+1. Create a `config.json` in the root directory of your project.
+2. Configure directories and file patterns.
+3. Run:
 
 ```bash
-python3 backup_tool.py recreate --force
-python3 backup_tool.py /path/backup search --mask "*.py" --mask "*.pdf" --mask "*.md"
+python3 backup.py --config config.json
 ```
 
-## Best Practices
+4. Check `mirror/` for current state and `backup_YYYYMMDD_HHMMSS/` for incremental backups.
+5. Enjoy minimalistic, high-performance backups!
 
-* Configure separate backup profiles for USB drives, external disks, or different projects.
-* Use increments to store history; mirror only keeps the latest state.
-* You can move increments between drives without breaking links.
-* Deleted tracked files remain accessible via increments.
+---
 
-## ✨ Wow Features
-
-This backup system is not just a regular backup tool – here are the features that make it stand out:
-
-* **Mirror + Incremental Backup**: Efficiently stores only changes while keeping a full history. No duplicate files, less space used, but full recoverability.
-* **Powerful File Search**: Search by filename patterns, size, date, or path across multiple backup increments in seconds.
-* **Safe Exploration**: Browse backups without the risk of accidentally modifying or deleting anything.
-* **Deleted Files Access**: Even files deleted from the source remain accessible via increments.
-* **Multiple Profiles & Cross-Platform**: Separate configurations for USB drives, external disks, or projects. Works on Linux, macOS, and Windows.
-* **Detailed Reports & Export**: Export search results and backup stats in **JSON**, **CSV**, or **Markdown** for easy reporting.
-* **Self-contained Increments**: Each backup increment is independent; you can copy, move, or remove them without breaking links.
-
-These features make managing backups intuitive, safe, and surprisingly powerful.
+**Summary:**
+350 lines of Python + 10 lines of config → professional backup system, fast, safe, predictable, and flexible.
