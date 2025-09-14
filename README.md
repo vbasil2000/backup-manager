@@ -1,31 +1,44 @@
-# Minimalistic Yet Powerful Backup System
+# Backup + Backup Tool: Minimalistic Yet Powerful Backup System
 
-This backup system is designed to be simple, reliable, and high-performance. With just \~350 lines of Python code and a tiny JSON config, you can handle complex backup scenarios.
+## 📋 Description
 
-## How it Works
+A complete backup system combining two complementary tools:
 
-* **Source → Mirror → Incremental Backups**
+- **Backup** — creates efficient, incremental backups
+- **Backup Tool** — provides full control, search, and analytics
 
-  * `src` — your source files
-  * `mirror` — live copy of all tracked files
-  * `backup_xxx` — incremental copies of changes and deletions
+This combination delivers **speed, simplicity, reliability, and flexibility** in one package.
 
-* **Set-based Mathematics**
+---
 
-  * Pure set operations to determine new, changed, and deleted files
-  * No duplicates, no extra scans
-  * Predictable and deterministic
+## ⚡ Key Advantages
 
-* **Incremental Backups**
+- **Lightning Fast**: search 100k+ files in seconds, parallel processing, minimal I/O  
+- **Space Efficient**: hardlinks instead of copies, incremental backups store only changes  
+- **Full Control**: filters by size, time, masks, paths; dry-run support for safe deletion  
+- **Reliable**: atomic metadata operations, complete error handling, corruption protection  
+- **Minimal Complexity**: ~350 lines of Python + ~10 lines of JSON config, zero dependencies  
 
-  * Only new/changed files + deleted files
-  * Hardlinks to mirror save space
-  * JSON metadata tracks all operations
+---
 
-## Configuration (Simple JSON)
+## 🛠 How It Works
 
-### Directories:
+```
+Source → Mirror → Incremental Backups
+src — source files
+mirror — live copy of all tracked files
+backup_YYYYMMDD_HHMMSS — incremental copy of changes & deletions
+```
 
+- **Set-based Logic**: pure set operations determine new, changed, and deleted files  
+- **Incremental Backups**: only new/changed files + deleted files; hardlinks save space  
+- **Metadata**: JSON tracks size, mtime, path, operation type, and statistics  
+
+---
+
+## 🔧 Configuration (Simple JSON)
+
+### Directories
 ```json
 {
   "include_dirs": [".config", "Documents"],
@@ -33,11 +46,9 @@ This backup system is designed to be simple, reliable, and high-performance. Wit
   "exclude_dirs": []
 }
 ```
+> Only specify `exclude_dirs` if you want to remove some branches. By default, all non-included directories are excluded.
 
-> **Note:** Only specify `exclude_dirs` if you want to remove some branches from include\_dirs. By default, directories not included are automatically excluded.
-
-### Files:
-
+### Files
 ```json
 {
   "include_files": [".*", "*.txt:rec"],
@@ -45,93 +56,87 @@ This backup system is designed to be simple, reliable, and high-performance. Wit
   "exclude_files": []
 }
 ```
-
-## Features
-
-* `:rec` → recursive search at any level
-* Patterns without `:rec` → only root directory
-* Directories are paths relative to `src`
-* Files are patterns — easy to control granularity
-
-## Implementation Highlights
-
-### Performance
-
-* Parallel file copying (ThreadPoolExecutor)
-* Minimal I/O operations
-* Lightning-fast set operations
-
-### Reliability
-
-* Atomic JSON writes → prevents corruption
-* Handles all file read/write errors
-* Safe removal of empty directories
-* Edge cases fully accounted for
-
-### Incrementals
-
-* Files categorized as:
-
-  * `new/changed` → hardlink to mirror + copy to increment
-  * `deleted` → hardlink to mirror + record in increment
-* Metadata includes: size, mtime, path, operation type, and statistics
-
-### Pattern System
-
-* Recursive: `*.txt:rec` → all levels
-* Non-recursive: `.*` → only root directory
-* Exclusions: specify only if you want to remove from include
-* Advantage: strict, predictable, no magic
-
-### Set-based Logic
-
-* `new_files = current_tracked - old_mirror`
-* `deleted_files = old_mirror - current_tracked`
-* `updated_files = compare size & mtime`
-* Fully deterministic — predictable backups
-
-### Atomic & Safe Operations
-
-* Temporary `.tmp` files → atomic JSON replacement
-* Hardlinks instead of copies → saves disk space & time
-* Parallel processing → faster for thousands of files
-
-### Statistics
-
-After backup, you get:
-
-* Total files in mirror
-* Number of tracked files
-* Files removed from mirror
-* New/changed/deleted files in incremental backup
-
-### Minimal Complexity
-
-* 350 lines of Python → easy to read, modify, and maintain
-* 10 lines of config → easy to customize include/exclude rules
-* 0 dependencies → pure Python
-
-## Key Advantages
-
-* No magic — fully explicit and predictable
-* Space-efficient — hardlinks + incremental backups
-* Full control over operations
-* Fast, safe, reliable
-* Suitable for personal or professional use
-
-## Getting Started
-
-1. Create a `config.json` in the root directory of your project.
-2. Configure directories and file patterns.
-3. Run:
-
-```bash
-python3 backup.py --config config.json
-```
-
-4. Check `mirror/` for current state and `backup_YYYYMMDD_HHMMSS/` for incremental backups.
-5. Enjoy minimalistic, high-performance backups!
+- `:rec` → recursive search  
+- No `:rec` → only root directory  
 
 ---
 
-**Summary:** 350 lines of Python + 10 lines of config → professional backup system, fast, safe, predictable, and flexible.
+## 🔍 Backup Tool Usage
+
+### List Backups
+```bash
+python3 backup_tool.py /path/to/backups list
+python3 backup_tool.py /path/to/backups list --detailed
+```
+
+### Recreate Metadata
+```bash
+python3 backup_tool.py /path/to/backups recreate
+python3 backup_tool.py /path/to/backups recreate --force
+python3 backup_tool.py /path/to/backups recreate --backup backup_20240101
+```
+
+### Search Files
+```bash
+python3 backup_tool.py /path/to/backups search --mask "*.py" --size ">100K" --time ">2024-01-01"
+python3 backup_tool.py /path/to/backups search --mask "*.json" --json
+```
+
+### Delete Files
+```bash
+# Dry-run first
+python3 backup_tool.py /path/to/backups delete backup_20240101 --mask "*.tmp" --dry-run
+
+# Then delete
+python3 backup_tool.py /path/to/backups delete backup_20240101 --mask "*.tmp"
+```
+
+---
+
+## 📊 Common Use Cases
+
+- **Analyze recent changes**
+```bash
+python3 backup_tool.py /backups search --mask "*.py" --mask "*.js" --time ">2024-01-15" --last-backups 7
+```
+
+- **Clean temporary files**
+```bash
+python3 backup_tool.py /backups delete backup_20231201 --mask "*.tmp" --mask "*.log"
+```
+
+- **Export project statistics**
+```bash
+python3 backup_tool.py /backups search --mask "src/*.py:rec" --json > project_stats.json
+```
+
+---
+
+## 🛡 Reliability & Safety
+
+- **Atomic Operations**: JSON writes replace temp files atomically  
+- **Hardlinks**: save disk space and time  
+- **Parallel Processing**: speeds up thousands of files  
+- **Safe Removal**: empty directories cleaned safely  
+
+---
+
+## 🚀 Getting Started
+
+1. Create `config.json` at project root.
+2. Configure directories and files.
+3. Run first backup:
+```bash
+python3 backup.py --config config.json
+```
+4. Explore backups and monitor:
+```bash
+python3 backup_tool.py /backup/storage list --detailed
+```
+
+---
+
+## 🌟 Summary
+
+Backup + Backup Tool = **Professional, fast, safe, predictable, and flexible backup system**.  
+Minimal Python code, minimal config, zero dependencies — perfect for developers, sysadmins, analysts, or anyone who values time and data integrity.
