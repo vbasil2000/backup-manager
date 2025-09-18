@@ -1,4 +1,3 @@
-
 # Backup + Backup Tool: Minimalistic Yet Powerful Backup System
 
 ## 📋 Description
@@ -67,6 +66,37 @@ backup_YYYYMMDD_HHMMSS — incremental copy of changes & deletions
 * No `:rec` → only root directory
 * Directories are paths relative to `src`
 * Files are glob patterns for precise control
+
+---
+
+### 🔍 Path Masks (Directory & File Patterns)
+
+* **Directories** (`include_dirs`, `track_dirs`, `exclude_dirs`)
+
+  * Supports **wildcards**: `*`, `?`, `[abc]`
+  * **Recursive patterns** expanded automatically **before backup**
+  * Examples:
+
+    ```json
+    "include_dirs": ["Documents/*", "Projects/pyt*"]
+    "exclude_dirs": ["Documents/tmp", "Projects/*/build"]
+    ```
+
+* **Files** (`include_files`, `track_files`, `exclude_files`)
+
+  * Supports **glob patterns** with optional `:rec` suffix
+
+    * `*.py:rec` → recursively include all `.py` files
+    * `README.md` → include only at root of specified directory
+  * Patterns are evaluated **during scanning**, not in config
+  * Examples:
+
+    ```json
+    "include_files": ["*.py:rec", "README.md"]
+    "exclude_files": ["*.tmp:rec", "*.log:rec"]
+    ```
+
+> ✅ **Benefit**: Use concise masks in config; backup system resolves directories before scanning and file patterns at scan-time, keeping config clean.
 
 ---
 
@@ -153,7 +183,7 @@ python3 backup_tool.py /backups search --mask "src/*.py:rec" --json > project_st
 ## 🚀 Getting Started
 
 1. Create `config.json` at project root.
-2. Configure directories and files.
+2. Configure directories, files, and masks.
 3. Run first backup:
 
 ```bash
