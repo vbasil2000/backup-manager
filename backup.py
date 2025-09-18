@@ -17,6 +17,7 @@ log = logging.getLogger("backup")
 def load_config(config_file: Path):
     with open(config_file, encoding="utf-8") as f:
         cfg = json.load(f)
+    # Defaults
     cfg.setdefault("max_workers", 8)
     cfg.setdefault("include_dirs", [])
     cfg.setdefault("track_dirs", [])
@@ -27,6 +28,43 @@ def load_config(config_file: Path):
     cfg.setdefault("max_files_per_dir", 50)
     return cfg
 
+# -------------------- PREPROCESSOR (expand dirs) --------------------
+def parse_rec_pattern(pattern: str):
+    if pattern.endswith(":rec"):
+        return pattern[:-4], True
+    return pattern, False
+
+def expand_directory_patterns(base_path: Path, patterns: list[str]) -> list[str]:
+    expanded = set()
+    for pattern in patterns:
+        if pattern.endswith(":rec"):
+            actual_pattern = pattern[:-4]
+            matches = list(base_path.rglob(actual_pattern))
+        else:
+            matches = list(base_path.glob(pattern))
+        for match in matches:
+            if match.is_dir() and match.exists():
+                try:
+                    rel_path = match.relative_to(base_path)
+                    expanded.add(str(rel_path))
+                except ValueError:
+                    continue
+    return sorted(expanded)
+
+def preprocess_config(cfg_path: Path):
+    if not cfg_path.exists():
+        log.error(f"Config file not found: {cfg_path}")
+        exit(1)
+    with open(cfg_path, encoding="utf-8") as f:
+        cfg = json.load(f)
+
+    base_path = Path(cfg["src"]).expanduser().resolve()
+
+    for key in ["include_dirs", "track_dirs", "exclude_dirs"]:
+        if key in cfg and cfg[key]:
+            cfg[key] = expand_directory_patterns(base_path, cfg[key])
+    return cfg
+
 # -------------------- FILE OPERATIONS --------------------
 def copy_file(src: Path, dst: Path) -> bool:
     try:
@@ -34,7 +72,7 @@ def copy_file(src: Path, dst: Path) -> bool:
         shutil.copy2(src, dst)
         return True
     except Exception as e:
-        log.warning(f"Failed to copy {src} → {dst}: {e}")
+        log.warning(f"Failed to copy {src} to {dst}: {e}")
         return False
 
 def copy_files_sequential(files_to_copy):
@@ -48,7 +86,6 @@ def optimize_copy_operations(files_to_update, max_files_per_dir=50):
     dir_groups = defaultdict(list)
     for src, dst in files_to_update:
         dir_groups[dst.parent].append((src, dst))
-
     optimized_operations = []
     for target_dir, files in dir_groups.items():
         if len(files) > max_files_per_dir:
@@ -78,12 +115,6 @@ def remove_empty_dirs(path: Path):
     except (PermissionError, OSError):
         pass
 
-# -------------------- PATTERN UTIL --------------------
-def parse_rec_pattern(pattern: str):
-    if pattern.endswith(':rec'):
-        return pattern[:-4], True
-    return pattern, False
-
 def matches_exclude_for_file(rel_path: Path, pattern: str) -> bool:
     pstr = str(rel_path)
     pat, is_rec = parse_rec_pattern(pattern)
@@ -97,10 +128,9 @@ def matches_exclude_for_file(rel_path: Path, pattern: str) -> bool:
         return False
 
 # -------------------- MIRROR BUILD --------------------
-def build_mirror_set_optimized(src_path: Path, include_dirs, track_dirs, include_files, track_files, exclude_dirs, exclude_files):
+def build_mirror_set_with_metadata(src_path: Path, include_dirs, track_dirs, include_files, track_files, exclude_dirs, exclude_files):
     src_path = src_path.resolve()
-    all_files = {}  # Path -> is_tracked
-
+    all_files = {}  # Path -> (is_tracked, (size, mtime))
     exclude_parts = [tuple(Path(d).parts) for d in exclude_dirs]
 
     def is_excluded(rel_parts):
@@ -109,7 +139,7 @@ def build_mirror_set_optimized(src_path: Path, include_dirs, track_dirs, include
                 return True
         return False
 
-    # 1) Scan include_dirs + track_dirs
+    # Scan include_dirs + track_dirs
     for d in include_dirs + track_dirs:
         is_tracked = d in track_dirs
         root = src_path / d
@@ -120,38 +150,33 @@ def build_mirror_set_optimized(src_path: Path, include_dirs, track_dirs, include
             current = stack.pop()
             try:
                 for entry in current.iterdir():
+                    rel = entry.relative_to(src_path)
                     if entry.is_dir():
-                        rel = entry.relative_to(src_path)
-                        if is_excluded(rel.parts):
-                            continue
-                        stack.append(entry)
+                        if not is_excluded(rel.parts):
+                            stack.append(entry)
                     elif entry.is_file():
-                        rel = entry.relative_to(src_path)
                         if is_excluded(rel.parts):
                             continue
                         try:
-                            entry.stat()
+                            st = entry.stat()
                         except OSError:
                             continue
-                        all_files[entry] = is_tracked
+                        all_files[entry] = (is_tracked, (st.st_size, st.st_mtime))
             except (PermissionError, OSError):
                 continue
 
-    # 2) Add explicit include/track files
+    # Explicit include/track files
     explicit_files = set()
     for pattern in include_files + track_files:
         is_tracked = pattern in track_files
         pat, is_rec = parse_rec_pattern(pattern)
-        matches = []
-
         try:
             if is_rec:
                 matches = list(src_path.rglob(pat))
             elif '/' in pattern:
                 dir_part, file_pat = pattern.rsplit('/', 1)
                 dir_path = src_path / dir_part
-                if dir_path.exists():
-                    matches = list(dir_path.glob(file_pat))
+                matches = list(dir_path.glob(file_pat)) if dir_path.exists() else []
             else:
                 matches = list(src_path.glob(pat))
         except (PermissionError, OSError):
@@ -161,13 +186,13 @@ def build_mirror_set_optimized(src_path: Path, include_dirs, track_dirs, include
             if not m.is_file():
                 continue
             try:
-                m.relative_to(src_path)
-            except ValueError:
+                st = m.stat()
+            except OSError:
                 continue
-            all_files[m] = is_tracked
+            all_files[m] = (is_tracked, (st.st_size, st.st_mtime))
             explicit_files.add(m)
 
-    # 3) Apply exclude_files only to non-explicit files
+    # Exclude files for non-explicit
     for f in list(all_files.keys()):
         if f in explicit_files:
             continue
@@ -179,27 +204,25 @@ def build_mirror_set_optimized(src_path: Path, include_dirs, track_dirs, include
 
     return all_files
 
-# -------------------- MIRROR SCAN --------------------
-def scan_mirror_files(mirror_path: Path):
-    log.info("Scanning mirror directory...")
-    mirror_files = set()
+def scan_mirror_with_metadata(mirror_path: Path):
+    mirror_files = {}
     if not mirror_path.exists():
         return mirror_files
     stack = [mirror_path]
     while stack:
         current = stack.pop()
         try:
-            with os.scandir(current) as it:
-                for entry in it:
+            for entry in current.iterdir():
+                rel = entry.relative_to(mirror_path)
+                if entry.is_file():
                     try:
-                        if entry.is_file(follow_symlinks=False):
-                            rel = Path(entry.path).relative_to(mirror_path)
-                            mirror_files.add(rel)
-                        elif entry.is_dir(follow_symlinks=False):
-                            stack.append(Path(entry.path))
-                    except (OSError, PermissionError):
+                        st = entry.stat()
+                    except OSError:
                         continue
-        except (OSError, PermissionError):
+                    mirror_files[rel] = (st.st_size, st.st_mtime)
+                elif entry.is_dir():
+                    stack.append(entry)
+        except (PermissionError, OSError):
             continue
     return mirror_files
 
@@ -227,11 +250,7 @@ def create_increment_metadata(increment_path: Path, new_changed_files, deleted_f
         try:
             rel = str(f.relative_to(src_path))
             st = f.stat()
-            metadata["files"]["new_changed_sample"].append({
-                "path": rel,
-                "size": st.st_size,
-                "mtime": st.st_mtime
-            })
+            metadata["files"]["new_changed_sample"].append({"path": rel, "size": st.st_size, "mtime": st.st_mtime})
         except (OSError, ValueError):
             continue
     with open(metadata_path, "w", encoding="utf-8") as mf:
@@ -239,17 +258,16 @@ def create_increment_metadata(increment_path: Path, new_changed_files, deleted_f
     return metadata_path
 
 # -------------------- BACKUP --------------------
-def backup(config_file: Path):
+def backup(config_file: Path, dry_run=False):
     total_start_time = time.time()
-    cfg = load_config(config_file)
+    cfg = preprocess_config(config_file)
     src_path = Path(cfg["src"]).expanduser().resolve()
     dst_path = Path(cfg["dist"]).expanduser().resolve()
     mirror_path = dst_path / "mirror"
     mirror_path.mkdir(parents=True, exist_ok=True)
 
-    # Build mirror set
-    log.info("Scanning source directory...")
-    mirror_set = build_mirror_set_optimized(
+    log.info("Scanning source directory with metadata...")
+    src_files_dict = build_mirror_set_with_metadata(
         src_path,
         cfg["include_dirs"],
         cfg["track_dirs"],
@@ -258,40 +276,23 @@ def backup(config_file: Path):
         cfg["exclude_dirs"],
         cfg["exclude_files"]
     )
-
-    all_files_set = set(mirror_set.keys())
-    tracked_set = {f for f, tracked in mirror_set.items() if tracked}
-
-    # Scan mirror
-    mirror_files_set = scan_mirror_files(mirror_path)
-
-    # --- Сравнение множествами ---
-    all_files_rel = {f.relative_to(src_path) for f in all_files_set}
+    all_files_set = set(src_files_dict.keys())
+    tracked_set = {f for f, (tracked, _) in src_files_dict.items() if tracked}
     tracked_rel_set = {f.relative_to(src_path) for f in tracked_set}
 
-    # Новые tracked
-    new_tracked_rel = tracked_rel_set - mirror_files_set
+    log.info("Scanning mirror directory with metadata...")
+    mirror_files_dict = scan_mirror_with_metadata(mirror_path)
+    mirror_set = set(mirror_files_dict.keys())
 
-    # Общие tracked → проверка по stat()
-    common_tracked = tracked_rel_set & mirror_files_set
-    changed_tracked_rel = set()
-    for rel in common_tracked:
-        src_file = src_path / rel
-        mir_file = mirror_path / rel
-        try:
-            if src_file.stat().st_size != mir_file.stat().st_size or \
-               abs(src_file.stat().st_mtime - mir_file.stat().st_mtime) > 1:
-                changed_tracked_rel.add(rel)
-        except OSError:
-            changed_tracked_rel.add(rel)
+    # Compare tracked files
+    new_or_changed_tracked = {f for f in tracked_set
+                              if f.relative_to(src_path) not in mirror_set
+                              or src_files_dict[f][1] != mirror_files_dict.get(f.relative_to(src_path))}
+    deleted_tracked = {rel for rel in mirror_set if rel in tracked_rel_set and not (src_path / rel).exists()}
 
-    new_or_changed_tracked = {src_path / r for r in (new_tracked_rel | changed_tracked_rel)}
-
-    # Удалённые tracked
-    deleted_tracked = (tracked_rel_set - all_files_rel) & mirror_files_set
-
-    # --- Increment ---
+    # Create increment if needed
     increment_created = False
+    metadata_path = None
     if new_or_changed_tracked or deleted_tracked:
         ts = time.strftime("%Y%m%d_%H%M%S")
         increment_path = dst_path / f"backup_{ts}"
@@ -316,7 +317,7 @@ def backup(config_file: Path):
                     files_added = True
 
         if files_added:
-            create_increment_metadata(increment_path, new_or_changed_tracked, deleted_tracked, src_path)
+            metadata_path = create_increment_metadata(increment_path, new_or_changed_tracked, deleted_tracked, src_path)
             increment_created = True
         else:
             try:
@@ -324,27 +325,14 @@ def backup(config_file: Path):
             except Exception:
                 pass
 
-    # --- Mirror update ---
-    log.info("Updating mirror directory...")
+    # Update mirror
     files_to_update = []
-    common_all = all_files_rel & mirror_files_set
-    new_files = all_files_rel - mirror_files_set
-
-    for rel in new_files | common_all:
-        src_file = src_path / rel
+    for src_file in all_files_set:
+        rel = src_file.relative_to(src_path)
+        src_meta = src_files_dict[src_file][1]
+        mir_meta = mirror_files_dict.get(rel)
         mirror_file = mirror_path / rel
-        try:
-            src_st = src_file.stat()
-        except OSError:
-            continue
-        if not mirror_file.exists():
-            files_to_update.append((src_file, mirror_file))
-            continue
-        try:
-            mir_st = mirror_file.stat()
-            if src_st.st_size != mir_st.st_size or abs(src_st.st_mtime - mir_st.st_mtime) > 1:
-                files_to_update.append((src_file, mirror_file))
-        except OSError:
+        if mir_meta != src_meta:
             files_to_update.append((src_file, mirror_file))
 
     total_success = 0
@@ -357,15 +345,17 @@ def backup(config_file: Path):
                 with ThreadPoolExecutor(max_workers=cfg["max_workers"]) as exe:
                     futures = {exe.submit(copy_file, src, dst): (src, dst) for src, dst in group}
                     for future in as_completed(futures):
+                        src_dst = futures[future]
                         try:
                             if future.result():
                                 total_success += 1
                         except Exception as e:
-                            src, dst = futures[future]
-                            log.warning(f"Error copying {src} → {dst}: {e}")
+                            src, dst = src_dst
+                            log.warning(f"Error copying {src} to {dst}: {e}")
 
-    # --- Очистка mirror ---
-    files_to_remove = [mirror_path / rel for rel in (mirror_files_set - all_files_rel)]
+    # Cleanup mirror
+    current_rel_set = {f.relative_to(src_path) for f in all_files_set}
+    files_to_remove = [mirror_path / rel for rel in mirror_set if rel not in current_rel_set]
     removed_count = 0
     for f in files_to_remove:
         try:
@@ -374,14 +364,13 @@ def backup(config_file: Path):
         except OSError:
             continue
     remove_empty_dirs(mirror_path)
-    mirror_files_set = scan_mirror_files(mirror_path)
 
-    # --- Summary ---
     total_time = time.time() - total_start_time
     log.info(f"Source files: {len(all_files_set)}, Tracked files: {len(tracked_set)}")
+    mirror_files_set = scan_mirror_with_metadata(mirror_path)
     log.info(f"Mirror files: {len(mirror_files_set)}, Updated: {total_success}, Removed: {removed_count}")
     if increment_created:
-        log.info(f"Increment created: {len(new_or_changed_tracked)} new/changed, {len(deleted_tracked)} deleted")
+        log.info(f"Increment created: {len(new_or_changed_tracked)} new/changed, {len(deleted_tracked)} deleted (folder: {increment_path.name})")
     else:
         log.info("No changes - increment not created")
     log.info(f"Total time: {total_time:.2f}s")
@@ -390,14 +379,8 @@ def backup(config_file: Path):
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Backup script with mirror + incremental")
-    parser.add_argument("--config", type=str, default="config.json", help="Path to config file")
+    parser.add_argument("config", nargs="?", default="config.json", help="Path to config file")
+    parser.add_argument("--dry-run", action="store_true", help="Perform a dry run")
     args = parser.parse_args()
     config_file = Path(args.config).resolve()
-    if not config_file.exists():
-        log.error(f"Config file not found: {config_file}")
-        exit(1)
-    try:
-        backup(config_file)
-    except Exception as e:
-        log.error(f"Backup failed: {e}")
-        raise
+    backup(config_file, dry_run=args.dry_run)
