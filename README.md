@@ -17,7 +17,7 @@ This combination delivers **speed, simplicity, reliability, and flexibility** in
 * **Space Efficient**: hardlinks instead of copies, incremental backups store only changes
 * **Full Control**: filters by size, time, masks, paths; dry-run support for safe deletion
 * **Reliable**: atomic metadata operations, complete error handling, corruption protection
-* **Minimal Complexity**: \~350 lines of Python + \~10 lines of JSON config, zero dependencies
+* **Minimal Complexity**: \~500 lines of Python + \~10 lines of JSON config, zero dependencies
 
 ---
 
