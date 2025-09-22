@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
 """
-UTILITY FOR WORKING WITH INCREMENTAL BACKUPS
-With improved readable output
+INCREMENTAL BACKUP EXPLORER UTILITY
+Focused on search and analysis of backup contents
 """
 
 import json
 import argparse
-import shutil
 import sys
 import re
 import os
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Dict, List, Optional, Set, Any, Tuple
 import fnmatch
 import logging
@@ -20,11 +19,27 @@ import logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-class BackupManager:
+# Color codes for terminal output
+class Colors:
+    RED = '\033[91m'
+    GREEN = '\033[92m'
+    YELLOW = '\033[93m'
+    BLUE = '\033[94m'
+    MAGENTA = '\033[95m'
+    CYAN = '\033[96m'
+    WHITE = '\033[97m'
+    BOLD = '\033[1m'
+    UNDERLINE = '\033[4m'
+    END = '\033[0m'
+
+class BackupExplorer:
     def __init__(self, backup_dir: Path):
         self.backup_dir = Path(backup_dir)
         if not self.backup_dir.exists():
             raise ValueError(f"Backup directory does not exist: {backup_dir}")
+        
+        # Cache for metadata to avoid repeated file reads
+        self.metadata_cache = {}
     
     def format_size(self, size_bytes: int) -> str:
         """Format file size into human-readable form"""
@@ -58,18 +73,29 @@ class BackupManager:
                     backups.append(item)
         return sorted(backups, key=lambda x: x.stat().st_mtime)
     
-    def load_metadata(self, backup_path: Path) -> Optional[Dict]:
-        """Load metadata of a backup in new format"""
+    def load_metadata(self, backup_path: Path, use_cache: bool = True) -> Optional[Dict]:
+        """Load metadata of a backup in new format with caching"""
+        backup_str = str(backup_path)
+        if use_cache and backup_str in self.metadata_cache:
+            return self.metadata_cache[backup_str]
+        
         metadata_file = backup_path / f"{backup_path.name}.json"
         if not metadata_file.exists():
             return None
         
         try:
             with open(metadata_file, 'r', encoding='utf-8') as f:
-                return json.load(f)
+                metadata = json.load(f)
+                if use_cache:
+                    self.metadata_cache[backup_str] = metadata
+                return metadata
         except (json.JSONDecodeError, IOError) as e:
             logger.warning(f"Error loading metadata for {backup_path.name}: {e}")
             return None
+    
+    def clear_metadata_cache(self):
+        """Clear the metadata cache"""
+        self.metadata_cache = {}
     
     def recreate_metadata(self, backup_path: Path, force: bool = False) -> bool:
         """Recreate metadata for a new-format backup"""
@@ -127,6 +153,8 @@ class BackupManager:
         try:
             with open(metadata_file, 'w', encoding='utf-8') as f:
                 json.dump(metadata, f, indent=2, ensure_ascii=False)
+            # Update cache
+            self.metadata_cache[str(backup_path)] = metadata
             logger.info(f"Metadata recreated for {backup_path.name}")
             return True
         except IOError as e:
@@ -320,7 +348,8 @@ class BackupManager:
                     "mtime_date": file_info["mtime_date"],
                     "category": file_info.get("category", "track"),
                     "backup_path": file_info["backup_path"],
-                    "filename": file_info["filename"]
+                    "filename": file_info["filename"],
+                    "full_backup_path": str(backup_path / file_info["backup_path"])
                 })
             
             if backup_results:
@@ -334,21 +363,22 @@ class BackupManager:
                 }
         
         return results
+    
     def _print_search_stats(self, results: Dict):
         """Print search statistics"""
         total_files = sum(len(b["files"]) for b in results.values())
         total_size = sum(f["size"] for b in results.values() for f in b["files"])
         
-        print(f"\nSearch results:")
-        print(f"   Backups: {len(results)}")
-        print(f"   Files: {total_files}")
-        print(f"   Size: {self.format_size(total_size)}")
+        print(f"\n{Colors.BOLD}Search results:{Colors.END}")
+        print(f"   {Colors.CYAN}Backups:{Colors.END} {len(results)}")
+        print(f"   {Colors.CYAN}Files:{Colors.END} {total_files}")
+        print(f"   {Colors.CYAN}Size:{Colors.END} {self.format_size(total_size)}")
         
         tracked = sum(1 for b in results.values() for f in b["files"] if f.get("category") in ["track", "tracked"])
         deleted = sum(1 for b in results.values() for f in b["files"] if f.get("category") in ["delete", "deleted"])
-        print(f"   Tracked: {tracked}, Deleted: {deleted}")
+        print(f"   {Colors.GREEN}Tracked:{Colors.END} {tracked}, {Colors.RED}Deleted:{Colors.END} {deleted}")
     
-    def print_results(self, results: Dict):
+    def print_results(self, results: Dict, show_full_paths: bool = False):
         """Improved output grouped by directories with aligned table"""
         if not results:
             print("🤷 No files found")
@@ -356,7 +386,7 @@ class BackupManager:
 
         for backup_name, backup_info in results.items():
             display_timestamp = self.format_timestamp_display(backup_info['backup_timestamp'])
-            print(f"\n📦 {backup_name} ({display_timestamp})")
+            print(f"\n{Colors.BOLD}📦 {backup_name} ({display_timestamp}){Colors.END}")
 
             files = backup_info["files"]
             if not files:
@@ -381,13 +411,19 @@ class BackupManager:
                 dir_files = files_by_dir[dir_path]
                 
                 # Directory header
-                print(f"\n  📁 {dir_path}/")
+                print(f"\n  {Colors.BLUE}📁 {dir_path}/{Colors.END}")
                 
                 # Column headers with fixed width
-                print("     {:<28} {:>10} {:>10} {:>10}".format(
-                    "File name", "Size", "Date", "Status"
-                ))
-                print("     " + "-"*30 + " " + "-"*10 + " " + "-"*12 + " " + "-"*6)
+                if show_full_paths:
+                    print("     {:<60} {:>10} {:>10} {:>10}".format(
+                        "File path", "Size", "Date", "Status"
+                    ))
+                    print("     " + "-"*62 + " " + "-"*10 + " " + "-"*12 + " " + "-"*6)
+                else:
+                    print("     {:<28} {:>10} {:>10} {:>10}".format(
+                        "File name", "Size", "Date", "Status"
+                    ))
+                    print("     " + "-"*30 + " " + "-"*10 + " " + "-"*12 + " " + "-"*6)
                 
                 for file_info in dir_files:
                     size_str = self.format_size(file_info["size"])
@@ -397,95 +433,71 @@ class BackupManager:
                     
                     # Color and status
                     if category in ["track", "tracked"]:
-                        color_start, status = "\033[92m", "✅"
+                        color_start, status = Colors.GREEN, "✅"
                     else:
-                        color_start, status = "\033[91m", "❌"
-                    color_end = "\033[0m"
+                        color_start, status = Colors.RED, "❌"
+                    color_end = Colors.END
                     
-                    file_name = Path(file_info['path']).name
-                    name_part, ext_part = Path(file_name).stem, Path(file_name).suffix
-                    
-                    max_name_length = 25
-                    if len(name_part) > max_name_length:
-                        display_name = f"{name_part[:max_name_length-3]}...{ext_part}"
+                    if show_full_paths:
+                        display_text = file_info['path']
+                        max_length = 58
                     else:
-                        display_name = file_name
+                        file_name = Path(file_info['path']).name
+                        name_part, ext_part = Path(file_name).stem, Path(file_name).suffix
+                        max_length = 25
+                        if len(name_part) > max_length:
+                            display_text = f"{name_part[:max_length-3]}...{ext_part}"
+                        else:
+                            display_text = file_name
                     
-                    display_name = display_name.ljust(30)
-                    colored_name = f"{color_start}{display_name}{color_end}"
+                    display_text = display_text.ljust(max_length + 2)
+                    colored_text = f"{color_start}{display_text}{color_end}"
                     
-                    print("     {:<30} {:>9} {:>12} {:>4}".format(
-                        colored_name, size_str, mtime_date, status
-                    ))
+                    if show_full_paths:
+                        print("     {:<60} {:>9} {:>12} {:>4}".format(
+                            colored_text, size_str, mtime_date, status
+                        ))
+                    else:
+                        print("     {:<30} {:>9} {:>12} {:>4}".format(
+                            colored_text, size_str, mtime_date, status
+                        ))
     
-    def delete_files_from_backup(self, backup_name: str, file_patterns: List[str], dry_run: bool = True):
-        """Delete files from a new-format incremental backup"""
-        backup_path = self.backup_dir / backup_name
-        if not backup_path.exists():
-            logger.error(f"Backup {backup_name} not found")
-            return False
+    def generate_restore_script(self, results: Dict, output_script: Path):
+        """Generate a shell script to restore found files"""
+        with open(output_script, 'w') as f:
+            f.write("#!/bin/bash\n")
+            f.write("# Auto-generated restore script\n")
+            f.write("# Use: bash restore_files.sh /path/to/restore/destination\n")
+            f.write("\n")
+            f.write("DEST_DIR=\"$1\"\n")
+            f.write("if [ -z \"$DEST_DIR\" ]; then\n")
+            f.write("    echo \"Usage: $0 /path/to/restore/destination\"\n")
+            f.write("    exit 1\n")
+            f.write("fi\n")
+            f.write("\n")
+            f.write("mkdir -p \"$DEST_DIR\"\n")
+            f.write("echo \"Restoring files to $DEST_DIR\"\n")
+            f.write("\n")
+            
+            for backup_name, backup_info in results.items():
+                backup_path = backup_info["backup_path"]
+                for file_info in backup_info["files"]:
+                    src_path = file_info["full_backup_path"]
+                    dest_path = f"\"$DEST_DIR/{file_info['path']}\""
+                    dest_dir = f"\"$DEST_DIR/{Path(file_info['path']).parent}\""
+                    
+                    f.write(f"mkdir -p {dest_dir} && ")
+                    f.write(f"cp -p \"{src_path}\" {dest_path} && ")
+                    f.write(f"echo \"Restored {file_info['path']}\"\n")
+            
+            f.write("\n")
+            f.write("echo \"Restore completed\"\n")
         
-        metadata = self.load_metadata(backup_path)
-        if not metadata:
-            logger.error(f"Metadata not found for {backup_name}")
-            return False
-        
-        processed_patterns = self._preprocess_patterns(file_patterns)
-        regex = self._compile_regex_patterns(processed_patterns)
-        
-        files_to_delete = []
-        for file_path, file_info in metadata["file_catalog"].items():
-            if regex.search(file_path):
-                files_to_delete.append((file_path, file_info))
-        
-        if not files_to_delete:
-            logger.info(f"No files matching patterns found in {backup_name}")
-            return True
-        
-        logger.info(f"Found {len(files_to_delete)} files to delete from {backup_name}")
-        
-        if dry_run:
-            logger.info("DRY RUN: Would delete files:")
-            for file_path, file_info in files_to_delete:
-                logger.info(f"  {file_path} ({file_info['category']})")
-            return True
-        
-        deleted_count = 0
-        for file_path, file_info in files_to_delete:
-            try:
-                backup_path_value = file_info.get("backup_path", f"{file_info.get('category', 'track')}/{file_path}")
-                file_to_delete = backup_path / backup_path_value
-                
-                if file_to_delete.exists():
-                    file_to_delete.unlink()
-                    logger.info(f"Deleted {file_path}")
-                    deleted_count += 1
-                
-                if file_path in metadata["file_catalog"]:
-                    del metadata["file_catalog"][file_path]
-                
-            except Exception as e:
-                logger.error(f"Error deleting {file_path}: {e}")
-        
-        # Update statistics
-        track_count = sum(1 for info in metadata["file_catalog"].values() if info.get("category") in ["track", "tracked"])
-        deleted_count_remaining = sum(1 for info in metadata["file_catalog"].values() if info.get("category") in ["delete", "deleted"])
-        
-        metadata["summary"]["new_or_changed_tracked"] = track_count
-        metadata["summary"]["deleted_tracked"] = deleted_count_remaining
-        metadata["summary"]["total_operations"] = track_count + deleted_count_remaining
-        
-        metadata_file = backup_path / f"{backup_name}.json"
-        try:
-            with open(metadata_file, 'w', encoding='utf-8') as f:
-                json.dump(metadata, f, indent=2, ensure_ascii=False)
-            logger.info(f"Updated metadata for {backup_name}")
-        except IOError as e:
-            logger.error(f"Error saving updated metadata: {e}")
-        
-        logger.info(f"Successfully deleted {deleted_count} files from {backup_name}")
-        return True
-    
+        # Make script executable
+        output_script.chmod(0o755)
+        print(f"Generated restore script: {output_script}")
+        print("Usage: bash restore_files.sh /path/to/restore/destination")
+
     def list_backups(self, detailed: bool = False):
         """List all backups with information"""
         backups = self.find_all_backups()
@@ -494,31 +506,31 @@ class BackupManager:
             print("No backups found")
             return
         
-        print(f"\nFound {len(backups)} backups:")
+        print(f"\n{Colors.BOLD}Found {len(backups)} backups:{Colors.END}")
         
         for backup_path in backups:
             metadata = self.load_metadata(backup_path)
             if metadata:
                 display_timestamp = self.format_timestamp_display(metadata.get('backup_timestamp', 'unknown'))
-                print(f"\n{backup_path.name}:")
-                print(f"  Time: {display_timestamp}")
-                print(f"  Type: {metadata.get('backup_type', 'unknown')}")
+                print(f"\n{Colors.BOLD}{backup_path.name}:{Colors.END}")
+                print(f"  {Colors.CYAN}Time:{Colors.END} {display_timestamp}")
+                print(f"  {Colors.CYAN}Type:{Colors.END} {metadata.get('backup_type', 'unknown')}")
                 if "summary" in metadata:
                     summary = metadata["summary"]
-                    print(f"  Tracked: {summary.get('new_or_changed_tracked', 0)} files")
-                    print(f"  Deleted: {summary.get('deleted_tracked', 0)} files")
-                    print(f"  Total operations: {summary.get('total_operations', 0)}")
+                    print(f"  {Colors.GREEN}Tracked:{Colors.END} {summary.get('new_or_changed_tracked', 0)} files")
+                    print(f"  {Colors.RED}Deleted:{Colors.END} {summary.get('deleted_tracked', 0)} files")
+                    print(f"  {Colors.CYAN}Total operations:{Colors.END} {summary.get('total_operations', 0)}")
                 
                 if detailed and "statistics" in metadata:
                     stats = metadata["statistics"]
                     size_str = self.format_size(stats.get('total_size', 0))
-                    print(f"  Size: {size_str}")
-                    print(f"  Files: {stats.get('total_files', 0)}")
+                    print(f"  {Colors.CYAN}Size:{Colors.END} {size_str}")
+                    print(f"  {Colors.CYAN}Files:{Colors.END} {stats.get('total_files', 0)}")
             else:
-                print(f"\n{backup_path.name}: (no metadata)")
+                print(f"\n{Colors.YELLOW}{backup_path.name}: (no metadata){Colors.END}")
 
 def main():
-    parser = argparse.ArgumentParser(description='Utility for managing incremental backups')
+    parser = argparse.ArgumentParser(description='Utility for exploring incremental backups')
     parser.add_argument('backup_dir', help='Path to the backups directory')
     
     subparsers = parser.add_subparsers(dest='command', help='Command to execute')
@@ -541,33 +553,29 @@ def main():
     search_parser.add_argument('--path', help='Path prefix filter')
     search_parser.add_argument('--last-backups', type=int, help='Search only in last N backups')
     search_parser.add_argument('--json', action='store_true', help='Output in JSON format')
-    
-    # DELETE command
-    delete_parser = subparsers.add_parser('delete', help='Delete files from a backup')
-    delete_parser.add_argument('backup_name', help='Backup name to modify')
-    delete_parser.add_argument('--mask', action='append', required=True, help='File mask for deletion')
-    delete_parser.add_argument('--dry-run', action='store_true', help='Simulate deletion without changes')
+    search_parser.add_argument('--full-paths', action='store_true', help='Show full file paths')
+    search_parser.add_argument('--generate-script', help='Generate restore script to specified file')
     
     args = parser.parse_args()
     
     try:
-        manager = BackupManager(args.backup_dir)
+        explorer = BackupExplorer(args.backup_dir)
         
         if args.command == 'list':
-            manager.list_backups(args.detailed)
+            explorer.list_backups(args.detailed)
             
         elif args.command == 'recreate':
             if args.backup:
                 backup_path = Path(args.backup_dir) / args.backup
                 if backup_path.exists():
-                    manager.recreate_metadata(backup_path, args.force)
+                    explorer.recreate_metadata(backup_path, args.force)
                 else:
                     logger.error(f"Backup {args.backup} not found")
             else:
-                manager.recreate_all_metadata(args.force)
+                explorer.recreate_all_metadata(args.force)
         
         elif args.command == 'search':
-            results = manager.search_files(
+            results = explorer.search_files(
                 args.mask, 
                 args.size, 
                 args.time, 
@@ -578,14 +586,13 @@ def main():
             if args.json:
                 print(json.dumps(results, indent=2, ensure_ascii=False))
             else:
-                manager.print_results(results)
+                explorer.print_results(results, args.full_paths)
                 if results:
-                    manager._print_search_stats(results)
-        
-        elif args.command == 'delete':
-            success = manager.delete_files_from_backup(args.backup_name, args.mask, args.dry_run)
-            if not success:
-                sys.exit(1)
+                    explorer._print_search_stats(results)
+                    
+                    # Generate restore script if requested
+                    if args.generate_script:
+                        explorer.generate_restore_script(results, Path(args.generate_script))
                 
         else:
             parser.print_help()
@@ -598,4 +605,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
+    
