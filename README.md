@@ -1,204 +1,186 @@
-# Backup + Backup Tool: Minimalistic Yet Powerful Backup System
+# 📦 Axiomatic Backup System + Backup Explorer
 
-## 📋 Description
+A complete backup solution combining efficient mirror/incremental backups with powerful search and analysis capabilities.
 
-A complete backup system combining two complementary tools:
+## ✨ Features
 
-* **Backup** — creates efficient, incremental backups
-* **Backup Tool** — provides full control, search, and analytics
+- **Efficient Storage:** Uses hardlinks to avoid duplicate file storage
+- **Incremental Backups:** Only stores changed files in each backup
+- **Powerful Search:** Find files by masks, size, date, and path patterns
+- **Flexible Configuration:** JSON-based configuration with include/exclude patterns
+- **Safe Operations:** Read-only by default with explicit restoration scripts
+- **Colorful UI:** Easy-to-read terminal output with color coding
+- **Metadata Management:** Automatic JSON metadata generation and recreation
 
-This combination delivers **speed, simplicity, reliability, and flexibility** in one package.
+## 🏗 Architecture
 
----
+The system consists of two complementary components:
 
-## ⚡ Key Advantages
+- **Axiomatic Backup System (backup.py)** - Creates efficient mirror and incremental backups
+- **Backup Explorer (backup_tool.py)** - Provides search, analysis and management capabilities
 
-* **Lightning Fast**: search 100k+ files in seconds, parallel processing, minimal I/O
-* **Space Efficient**: hardlinks instead of copies, incremental backups store only changes
-* **Full Control**: filters by size, time, masks, paths; dry-run support for safe deletion
-* **Reliable**: atomic metadata operations, complete error handling, corruption protection
-* **Minimal Complexity**: \~10 lines of JSON config, zero dependencies
+## 📋 Configuration
 
----
-
-## 🛠 Backup
-
-### How It Works
-
-```
-Source → Mirror → Incremental Backups
-src — source files
-mirror — live copy of all tracked files
-backup_YYYYMMDD_HHMMSS — incremental copy of changes & deletions
-```
-
-* **Set-based Logic**: pure set operations determine new, changed, and deleted files
-* **Incremental Backups**: only new/changed files + deleted files; hardlinks save space
-* **Metadata**: JSON tracks size, mtime, path, operation type, and statistics
-
----
-
-### 🔧 Configuration (Simple JSON)
-
-#### Directories
+Create a `config.json` file to define your backup strategy:
 
 ```json
 {
-  "include_dirs": [".config", "Documents"],
-  "track_dirs": [],
-  "exclude_dirs": []
+  "src": "/path/to/source",
+  "dst": "/path/to/backups",
+  "max_workers": 8,
+  "directory_priority": "include",
+  "include_dirs": [".config", "Documents", "Projects"],
+  "exclude_dirs": ["temp", "cache", "node_modules"],
+  "include_files": [".*", "*.txt:rec", "*.pdf"],
+  "exclude_files": ["*.tmp", "*.log", "*.swp"],
+  "track_dirs": ["Important"],
+  "track_files": ["*.important:rec"],
+  "preserved_dirs": [".git"]
 }
 ```
 
-> Only specify `exclude_dirs` if you want to remove some branches. By default, all non-included directories are excluded.
+### Pattern Syntax
 
-#### Files
+- `:rec` suffix enables recursive matching
+- Standard wildcards: `*`, `?`, `[]`
+- Directory patterns are always recursive
+- File patterns can be recursive or top-level only
 
-```json
-{
-  "include_files": [".*", "*.txt:rec"],
-  "track_files": [],
-  "exclude_files": []
-}
-```
+## 🚀 Usage
 
-* `:rec` → recursive search at any level
-* No `:rec` → only root directory
-* Directories are paths relative to `src`
-* Files are glob patterns for precise control
-
----
-
-### 🔍 Path Masks (Directory & File Patterns)
-
-* **Directories** (`include_dirs`, `track_dirs`, `exclude_dirs`)
-
-  * Supports **wildcards**: `*`, `?`, `[abc]`
-  * **Recursive patterns** expanded automatically **before backup**
-  * Examples:
-
-    ```json
-    "include_dirs": ["Documents/*", "Projects/pyt*"]
-    "exclude_dirs": ["Documents/tmp", "Projects/*/build"]
-    ```
-
-* **Files** (`include_files`, `track_files`, `exclude_files`)
-
-  * Supports **glob patterns** with optional `:rec` suffix
-
-    * `*.py:rec` → recursively include all `.py` files
-    * `README.md` → include only at root of specified directory
-  * Patterns are evaluated **during scanning**, not in config
-  * Examples:
-
-    ```json
-    "include_files": ["*.py:rec", "README.md"]
-    "exclude_files": ["*.tmp:rec", "*.log:rec"]
-    ```
-
-> ✅ **Benefit**: Use concise masks in config; backup system resolves directories before scanning and file patterns at scan-time, keeping config clean.
-
----
-
-### Backup Run Example
-
+### Creating Backups
 ```bash
-python3 backup.py --config config.json
+python backup.py --config config.json
 ```
 
-After running:
-
-* `mirror/` contains the current live copy
-* `backup_YYYYMMDD_HHMMSS/` contains only changes and deletions
-
----
-
-## 🔍 Backup Tool
-
-### List Backups
-
+### Listing Available Backups
 ```bash
-python3 backup_tool.py /path/to/backups list
-python3 backup_tool.py /path/to/backups list --detailed
+python backup_tool.py /backup/storage list
+python backup_tool.py /backup/storage list --detailed
 ```
 
-### Recreate Metadata
-
+### Searching Files
 ```bash
-python3 backup_tool.py /path/to/backups recreate
-python3 backup_tool.py /path/to/backups recreate --force
-python3 backup_tool.py /path/to/backups recreate --backup backup_20240101
+# Find large PDF files
+python backup_tool.py /backup/storage search --mask "*.pdf" --size ">10M"
+
+# Find files modified in date range
+python backup_tool.py /backup/storage search --mask "*" --time "2024-01-01..2024-01-31"
+
+# Search in specific path
+python backup_tool.py /backup/storage search --mask "*.py" --path "src/"
+
+# Limit to recent backups
+python backup_tool.py /backup/storage search --mask "*.log" --last-backups 5
+
+# JSON output for scripting
+python backup_tool.py /backup/storage search --mask "*.json" --json
 ```
 
-### Search Files
-
+### Managing Backups
 ```bash
-python3 backup_tool.py /path/to/backups search --mask "*.py" --size ">100K" --time ">2024-01-01"
-python3 backup_tool.py /path/to/backups search --mask "*.json" --json
+# Recreate metadata (if corrupted)
+python backup_tool.py /backup/storage recreate
+python backup_tool.py /backup/storage recreate --force
+
+# Generate restore script
+python backup_tool.py /backup/storage search --mask "*.txt" --generate-script restore_script.sh
+
+# Execute restore script
+bash restore_script.sh /path/to/restore/location
 ```
 
-### Delete Files
+## 🎯 Practical Examples
 
+### Find and Clean Temporary Files
 ```bash
-# Dry-run first
-python3 backup_tool.py /path/to/backups delete backup_20240101 --mask "*.tmp" --dry-run
+# Find temporary files
+python backup_tool.py /backup/storage search --mask "*.tmp" --mask "*.temp" --mask "*.cache"
 
-# Then delete
-python3 backup_tool.py /path/to/backups delete backup_20240101 --mask "*.tmp"
+# Generate cleanup script
+python backup_tool.py /backup/storage search --mask "*.tmp" --generate-script cleanup.sh
+
+# Review then execute cleanup
+bash cleanup.sh /tmp/cleanup
 ```
 
----
-
-## 📊 Common Use Cases
-
-* **Analyze recent changes**
-
+### Monitor Project Changes
 ```bash
-python3 backup_tool.py /backups search --mask "*.py" --mask "*.js" --time ">2024-01-15" --last-backups 7
+# Track source code changes over time
+python backup_tool.py /backup/storage search --mask "*.py" --mask "*.js" --time ">2024-01-01" --last-backups 7
 ```
 
-* **Clean temporary files**
-
+### Archive Large Files
 ```bash
-python3 backup_tool.py /backups delete backup_20231201 --mask "*.tmp" --mask "*.log"
+# Find large media files
+python backup_tool.py /backup/storage search --mask "*.mp4" --mask "*.mov" --size ">100M" --full-paths
 ```
 
-* **Export project statistics**
+## 🔧 Advanced Features
 
-```bash
-python3 backup_tool.py /backups search --mask "src/*.py:rec" --json > project_stats.json
+### Size Filters
+- `>100M` - Larger than 100MB
+- `<1G` - Smaller than 1GB
+- `10K-100K` - Between 10KB and 100KB
+
+### Time Filters
+- `2024-01-15` - On specific date
+- `>2024-01-01` - After date
+- `<2024-01-31` - Before date
+- `2024-01-01..2024-01-15` - Date range
+
+### Path Filters
+- `documents/` - Specific directory
+- `projects/*/src` - Pattern matching
+
+## 🛡 Safety Features
+
+- Dry-run option for deletion operations
+- Explicit confirmation for destructive operations
+- Metadata validation before operations
+- Atomic writes for all metadata changes
+- Error recovery and detailed logging
+
+## 📊 Output Examples
+
+The tool provides color-coded, organized output:
+```text
+📦 backup_20240101_120000 (2024-01-01 12:00)
+
+  📁 documents/
+     file.txt         1.2 MB  2024-01-01  ✅
+     report.pdf       2.5 MB  2024-01-01  ✅
+
+  📁 projects/
+     code.py          15 KB   2024-01-01  ✅
+     data.json        45 KB   2024-01-01  ✅
+
+Search results:
+   Backups: 1
+   Files: 4
+   Size: 3.8 MB
+   Tracked: 4, Deleted: 0
 ```
 
----
+## 🔄 Workflow
 
-## 🛡 Reliability & Safety
+1. Configure your backup strategy in `config.json`
+2. Run regular backups with `backup.py`
+3. Analyze backups with `backup_tool.py`
+4. Find and restore files as needed
+5. Clean up old or unnecessary backups
 
-* **Atomic Operations**: JSON writes replace temp files atomically
-* **Hardlinks**: save disk space and time
-* **Parallel Processing**: speeds up thousands of files
-* **Safe Removal**: empty directories cleaned safely
+## 📝 Requirements
 
----
+- Python 3.6+
+- No external dependencies
 
-## 🚀 Getting Started
+## 📄 License
 
-1. Create `config.json` at project root.
-2. Configure directories, files, and masks.
-3. Run first backup:
+MIT License - feel free to use and modify as needed.
 
-```bash
-python3 backup.py --config config.json
-```
+## 🤝 Contributing
 
-4. Explore backups and monitor:
+Contributions are welcome! Please feel free to submit a Pull Request.
 
-```bash
-python3 backup_tool.py /backup/storage list --detailed
-```
-
----
-
-## 🌟 Summary
-
-Backup + Backup Tool = **Professional, fast, safe, predictable, and flexible backup system**.
-Minimal Python code, minimal config, zero dependencies — perfect for developers, sysadmins, analysts, or anyone who values time and data integrity.
+**Axiomatic Backup System + Backup Explorer** - Because your data deserves predictable, reliable, and flexible protection.
